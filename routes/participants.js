@@ -1,11 +1,29 @@
 // routes/participants.js
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { Participant } = require('../models');
 const { sendRegistrationSMS } = require('../services/smsService');
 const { protect, adminOnly, checkSystemLock, logAction } = require('../middleware/auth');
 
-// All participant routes require authentication
+// ─────────────────────────────────────────────────────────────────
+// PUBLIC ROUTES — no login required
+// These must be declared BEFORE router.use(protect)
+// ─────────────────────────────────────────────────────────────────
+
+// PUBLIC: Total count for landing page live counter
+// Returns only the total number — no participant details exposed
+router.get('/public/count', async (req, res) => {
+  try {
+    const total = await Participant.countDocuments();
+    res.json({ success: true, total });
+  } catch (err) {
+    res.status(500).json({ success: false, total: 0 });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────
+// PROTECTED ROUTES — login required for everything below
+// ─────────────────────────────────────────────────────────────────
 router.use(protect);
 
 // ==================== GET ALL PARTICIPANTS ====================
@@ -47,7 +65,7 @@ router.post('/', checkSystemLock, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Participant must agree to the declaration.' });
     }
 
-    // Check duplicate
+    // ── DUPLICATE CHECK ──────────────────────────────────────────
     const existing = await Participant.findOne({
       $or: [
         { name: { $regex: `^${name.trim()}$`, $options: 'i' }, contactMobile },
@@ -55,7 +73,10 @@ router.post('/', checkSystemLock, async (req, res) => {
       ]
     });
     if (existing) {
-      return res.status(409).json({ success: false, message: `A participant named "${existing.name}" with this contact number already exists. Possible duplicate.` });
+      return res.status(409).json({
+        success: false,
+        message: `A participant named "${existing.name}" with this contact number already exists. Possible duplicate.`
+      });
     }
 
     // Create record
@@ -67,10 +88,9 @@ router.post('/', checkSystemLock, async (req, res) => {
       registeredByName: req.user.name
     });
 
-    // Send SMS (don't block response on SMS failure)
+    // Send SMS
     const phoneToSMS = contactNumber || contactMobile;
-    let smsSent = false;
-    let smsError = null;
+    let smsSent = false, smsError = null;
     try {
       await sendRegistrationSMS(phoneToSMS, name);
       smsSent = true;
@@ -78,7 +98,6 @@ router.post('/', checkSystemLock, async (req, res) => {
       smsError = smsErr.message;
       console.error('[SMS Error]', smsErr.message);
     }
-
     participant.smsSent = smsSent;
     participant.smsError = smsError;
     await participant.save();
@@ -143,7 +162,7 @@ router.post('/:id/resend-sms', adminOnly, async (req, res) => {
   }
 });
 
-// ==================== ANALYTICS ====================
+// ==================== ANALYTICS (login required) ====================
 router.get('/analytics/summary', async (req, res) => {
   try {
     const [total, byGender, byArea, byCategory, byStatus, byLanguage, todayCount] = await Promise.all([
@@ -153,9 +172,7 @@ router.get('/analytics/summary', async (req, res) => {
       Participant.aggregate([{ $group: { _id: '$category', count: { $sum: 1 } } }]),
       Participant.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
       Participant.aggregate([{ $group: { _id: '$language', count: { $sum: 1 } } }]),
-      Participant.countDocuments({
-        createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
-      })
+      Participant.countDocuments({ createdAt: { $gte: new Date(new Date().setHours(0,0,0,0)) } })
     ]);
     res.json({ success: true, analytics: { total, todayCount, byGender, byArea, byCategory, byStatus, byLanguage } });
   } catch (err) {
@@ -179,13 +196,86 @@ router.get('/export/csv', adminOnly, async (req, res) => {
     const csv = [headers, ...rows].map(r =>
       r.map(v => `"${(v || '').toString().replace(/"/g, '""')}"`).join(',')
     ).join('\n');
-    const filename = `TAC_YouthCamp2026_${new Date().toISOString().split('T')[0]}.csv`;
+    const filename = `TAC_Camp_${new Date().toISOString().split('T')[0]}.csv`;
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     await logAction('EXPORT_CSV', req, { details: { count: participants.length } });
     res.send(csv);
   } catch (err) {
     res.status(500).json({ success: false, message: 'Export failed.' });
+  }
+});
+
+
+// ── BULK REGISTRATION ─────────────────────────────────────
+// Accepts array of participants, validates each, skips duplicates
+router.post('/bulk', async (req, res) => {
+  try {
+    const { participants } = req.body;
+    if (!Array.isArray(participants) || participants.length === 0) {
+      return res.status(400).json({ success: false, message: 'Provide an array of participants.' });
+    }
+    if (participants.length > 500) {
+      return res.status(400).json({ success: false, message: 'Maximum 500 participants per bulk upload.' });
+    }
+
+    const results = { saved: 0, duplicates: [], errors: [] };
+
+    for (const p of participants) {
+      try {
+        const { name, gender, adminArea, category, status, contactName, contactLocation, contactMobile } = p;
+        // Basic validation
+        if (!name || !gender || !adminArea || !category || !status || !contactName || !contactLocation || !contactMobile) {
+          results.errors.push({ name: name || 'Unknown', reason: 'Missing required fields' });
+          continue;
+        }
+        // Duplicate check
+        const existing = await Participant.findOne({
+          $or: [
+            { name: { $regex: `^${name.trim()}$`, $options: 'i' }, contactMobile },
+            ...(p.contactNumber ? [{ contactNumber: p.contactNumber }] : [])
+          ]
+        });
+        if (existing) {
+          results.duplicates.push({ name: name.trim(), reason: 'Already registered' });
+          continue;
+        }
+        await Participant.create({
+          name: name.trim(), gender, adminArea,
+          district: p.district || '', category, status,
+          language: p.language || 'English',
+          contactNumber: p.contactNumber || '',
+          contactName: contactName.trim(),
+          contactLocation: contactLocation.trim(),
+          contactMobile,
+          declarationAgreed: true,
+          bulkImport: true,
+          smsSent: false,
+          registeredBy: req.user._id,
+          registeredByName: req.user.name
+        });
+        results.saved++;
+      } catch (err) {
+        if (err.code === 11000) {
+          results.duplicates.push({ name: p.name || 'Unknown', reason: 'Duplicate detected' });
+        } else {
+          results.errors.push({ name: p.name || 'Unknown', reason: err.message });
+        }
+      }
+    }
+
+    await logAction('BULK_REGISTRATION', req, {
+      details: { saved: results.saved, duplicates: results.duplicates.length, errors: results.errors.length }
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Bulk registration complete. Saved: ${results.saved}, Duplicates skipped: ${results.duplicates.length}, Errors: ${results.errors.length}`,
+      results
+    });
+  } catch (err) {
+    console.error('[Bulk Register]', err);
+    res.status(500).json({ success: false, message: 'Bulk registration failed.' });
   }
 });
 

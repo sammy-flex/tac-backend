@@ -24,7 +24,7 @@ router.post('/send-otp', otpLimiter, async (req, res) => {
   try {
     const { phone, purpose } = req.body;
     if (!phone) return res.status(400).json({ success: false, message: 'Phone number is required.' });
-    if (!['signup', 'reset', 'verify'].includes(purpose)) {
+    if (!['signup', 'reset', 'verify', 'finance'].includes(purpose)) {
       return res.status(400).json({ success: false, message: 'Invalid OTP purpose.' });
     }
     if (purpose === 'signup') {
@@ -82,7 +82,7 @@ router.post('/verify-otp', async (req, res) => {
 // ─── SIGN UP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
-    const { name, sex, email, phone, password, otpCode } = req.body;
+    const { name, sex, email, phone, password, otpCode, financeCode } = req.body;
     if (!name || !sex || !email || !phone || !password || !otpCode) {
       return res.status(400).json({ success: false, message: 'All fields are required.' });
     }
@@ -102,11 +102,25 @@ router.post('/signup', async (req, res) => {
       });
     }
 
+    // Determine role — finance role only granted via verified access code
+    let assignedRole = 'officer';
+    if (financeCode && financeCode.trim()) {
+      const { SystemSettings } = require('../models');
+      const codeSetting = await SystemSettings.findOne({ key: 'finance_access_code' });
+      if (!codeSetting?.value) {
+        return res.status(400).json({ success: false, message: 'No finance access code has been set. Contact your administrator.' });
+      }
+      if (financeCode.trim().toUpperCase() !== codeSetting.value.trim().toUpperCase()) {
+        return res.status(400).json({ success: false, message: 'Invalid finance access code. Please check with your administrator.' });
+      }
+      assignedRole = 'finance';
+    }
+
     const newUser = await User.create({
       name: name.trim(), sex,
       email: email.toLowerCase().trim(),
       phone: phone.trim(),
-      password, role: 'officer',
+      password, role: assignedRole,
       phoneVerified: true, isActive: true
     });
 

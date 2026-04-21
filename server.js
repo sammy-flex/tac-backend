@@ -1,4 +1,4 @@
-// server.js - TAC Youth Camp 2026 Backend
+// server.js — TAC Youth Camp 2026 | LOCAL VERSION
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -10,122 +10,114 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
-// ==================== SECURITY MIDDLEWARE ====================
+// ── SECURITY ──────────────────────────────────────────────
 app.use(helmet());
 app.use(mongoSanitize());
 app.set('trust proxy', 1);
 
-// CORS
+// CORS — allow both localhost:3000 and localhost:5173 (Vite default)
 app.use(cors({
   origin: [
-    process.env.FRONTEND_URL,
     'http://localhost:3000',
-    'http://localhost:5173'
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+    process.env.FRONTEND_URL
   ].filter(Boolean),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
 }));
 
-// Rate limiting
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  message: { success: false, message: 'Too many requests. Please try again later.' }
-});
-app.use(globalLimiter);
+// Rate limiting (relaxed for local testing)
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000 }));
 
-// Body parsing
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(morgan('dev'));
 
-// Logging
-if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
-
-// ==================== DATABASE ====================
+// ── DATABASE ──────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
-    console.log('✅ MongoDB connected');
+    console.log('✅  MongoDB connected successfully');
     await seedAdminAccount();
   })
   .catch(err => {
-    console.error('❌ MongoDB connection failed:', err.message);
+    console.error('\n❌  MongoDB connection FAILED:', err.message);
+    console.error('👉  Check your MONGODB_URI in backend/.env\n');
     process.exit(1);
   });
 
-// ==================== SEED ADMIN (First-time only) ====================
+// ── SEED ADMIN (first run only) ───────────────────────────
 async function seedAdminAccount() {
   try {
     const { User } = require('./models');
     const existing = await User.findOne({ role: 'admin' });
     if (existing) {
-      console.log(`✅ Admin account exists: ${existing.email}`);
+      console.log(`✅  Admin account ready: ${existing.email}`);
       return;
     }
-    const adminEmail = process.env.ADMIN_EMAIL;
-    const adminPassword = process.env.ADMIN_PASSWORD;
-    const adminName = process.env.ADMIN_NAME;
-    const adminPhone = process.env.ADMIN_PHONE;
-    if (!adminEmail || !adminPassword || !adminName || !adminPhone) {
-      console.warn('⚠️  ADMIN credentials not set in .env — skipping admin seed.');
+    const { ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME, ADMIN_PHONE } = process.env;
+    if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+      console.warn('⚠️   No admin credentials in .env — skipping seed.');
       return;
     }
     await User.create({
-      name: adminName,
+      name: ADMIN_NAME || 'Administrator',
       sex: 'Male',
-      email: adminEmail.toLowerCase(),
-      phone: adminPhone,
-      password: adminPassword,
+      email: ADMIN_EMAIL.toLowerCase(),
+      phone: ADMIN_PHONE || '+233000000000',
+      password: ADMIN_PASSWORD,
       role: 'admin',
       phoneVerified: true,
       isActive: true
     });
-    console.log(`✅ Admin account created: ${adminEmail}`);
-    console.log('⚠️  IMPORTANT: Delete ADMIN_EMAIL, ADMIN_PASSWORD from .env after first deployment!');
+    console.log(`✅  Admin account created: ${ADMIN_EMAIL}`);
   } catch (err) {
-    if (err.code === 11000) {
-      console.log('✅ Admin account already exists.');
-    } else {
-      console.error('❌ Admin seed failed:', err.message);
-    }
+    if (err.code === 11000) console.log('✅  Admin already exists.');
+    else console.error('❌  Admin seed error:', err.message);
   }
 }
 
-// ==================== ROUTES ====================
-app.use('/api/auth', require('./routes/auth'));
+// ── ROUTES ────────────────────────────────────────────────
+app.use('/api/auth',         require('./routes/auth'));
 app.use('/api/participants', require('./routes/participants'));
-app.use('/api/admin', require('./routes/admin'));
+app.use('/api/admin',        require('./routes/admin'));
+app.use('/api/finance',      require('./routes/finance'));
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
     status: 'online',
-    service: 'TAC Youth Camp 2026 API',
+    environment: 'local',
+    smsMode: process.env.SMS_TEST_MODE === 'true' ? 'TEST (console only)' : 'LIVE',
     time: new Date().toISOString()
   });
 });
 
-// ==================== ERROR HANDLER ====================
+// ── ERROR HANDLER ─────────────────────────────────────────
 app.use((err, req, res, next) => {
-  console.error('[Server Error]', err);
-  res.status(err.status || 500).json({
-    success: false,
-    message: process.env.NODE_ENV === 'production'
-      ? 'Something went wrong. Please try again.'
-      : err.message
-  });
+  console.error('[Error]', err.message);
+  res.status(err.status || 500).json({ success: false, message: err.message });
 });
 
-// 404
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found.' });
 });
 
-// ==================== START ====================
+// ── START ─────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 TAC Camp API running on port ${PORT}`);
-  console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log('\n' + '='.repeat(55));
+  console.log('🚀  TAC Youth Camp 2026 — LOCAL SERVER RUNNING');
+  console.log('='.repeat(55));
+  console.log(`📡  API:      http://localhost:${PORT}/api`);
+  console.log(`🔍  Health:   http://localhost:${PORT}/api/health`);
+  console.log(`📲  SMS Mode: ${process.env.SMS_TEST_MODE === 'true' ? '🟡 TEST (logged to console)' : '🟢 LIVE (real SMS)'}`);
+  console.log(`👤  Admin:    ${process.env.ADMIN_EMAIL}`);
+  console.log('='.repeat(55));
+  console.log('💡  Open a new terminal and run: cd frontend && npm run dev');
+  console.log('='.repeat(55) + '\n');
 });
 
 module.exports = app;
